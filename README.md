@@ -1,1 +1,1 @@
-# rocker-core
+# rocket-core
