@@ -14,6 +14,7 @@ import freechips.rocketchip.util._
 import freechips.rocketchip.util.property._
 import chisel3.internal.sourceinfo.SourceInfo
 import chisel3.experimental.dontTouch
+import chisel3.experimental.chiselName
 
 case class ICacheParams(
     nSets: Int = 64,
@@ -106,7 +107,7 @@ object GetPropertyByHartId {
     PriorityMux(tiles.collect { case t if f(t).isDefined => (t.hartId === hartId) -> f(t).get })
   }
 }
-
+@chiselName
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
   override val cacheParams = outer.icacheParams // Use the local parameters
@@ -114,7 +115,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val io = IO(new ICacheBundle(outer))
   val (tl_out, edge_out) = outer.masterNode.out(0)
   // Option.unzip does not exist :-(
-  val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
+  //val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip //tl_in is disabled
 
   val tECC = cacheParams.tagCode
   val dECC = cacheParams.dataCode
@@ -122,135 +123,264 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   require(isPow2(nSets) && isPow2(nWays))
   require(!usingVM || pgIdxBits >= untagBits)
 
-  val scratchpadOn = RegInit(false.B)
-  val scratchpadMax = tl_in.map(tl => Reg(UInt(width = log2Ceil(nSets * (nWays - 1)))))
-  def lineInScratchpad(line: UInt) = scratchpadMax.map(scratchpadOn && line <= _).getOrElse(false.B)
-  val scratchpadBase = outer.icacheParams.itimAddr.map { dummy =>
-    GetPropertyByHartId(p(RocketTilesKey), _.icache.flatMap(_.itimAddr.map(_.U)), io.hartid)
-  }
-  def addrMaybeInScratchpad(addr: UInt) = scratchpadBase.map(base => addr >= base && addr < base + outer.size).getOrElse(false.B)
-  def addrInScratchpad(addr: UInt) = addrMaybeInScratchpad(addr) && lineInScratchpad(addr(untagBits+log2Ceil(nWays)-1, blockOffBits))
-  def scratchpadWay(addr: UInt) = addr.extract(untagBits+log2Ceil(nWays)-1, untagBits)
-  def scratchpadWayValid(way: UInt) = way < nWays - 1
-  def scratchpadLine(addr: UInt) = addr(untagBits+log2Ceil(nWays)-1, blockOffBits)
-  val s0_slaveValid = tl_in.map(_.a.fire()).getOrElse(false.B)
-  val s1_slaveValid = RegNext(s0_slaveValid, false.B)
-  val s2_slaveValid = RegNext(s1_slaveValid, false.B)
-  val s3_slaveValid = RegNext(false.B)
-
   val s1_valid = Reg(init=Bool(false))
   val s1_tag_hit = Wire(Vec(nWays, Bool()))
-  val s1_hit = s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))
+  val s1_hit = s1_tag_hit.reduce(_||_)
   dontTouch(s1_hit)
   val s2_valid = RegNext(s1_valid && !io.s1_kill, Bool(false))
   val s2_hit = RegNext(s1_hit)
 
   val invalidated = Reg(Bool())
   val refill_valid = RegInit(false.B)
-  val send_hint = RegInit(false.B)
-  val refill_fire = tl_out.a.fire() && !send_hint
-  val hint_outstanding = RegInit(false.B)
+  val refill_fire = tl_out.a.fire()
   val s2_miss = s2_valid && !s2_hit && !io.s2_kill && !RegNext(refill_valid)
   val refill_addr = RegEnable(io.s1_paddr, s1_valid && !(refill_valid || s2_miss))
   val refill_tag = refill_addr(tagBits+untagBits-1,untagBits)
   val refill_idx = refill_addr(untagBits-1,blockOffBits)
   val refill_one_beat = tl_out.d.fire() && edge_out.hasData(tl_out.d.bits)
 
-  io.req.ready := !(refill_one_beat || s0_slaveValid || s3_slaveValid)
+  io.req.ready := !(refill_one_beat)
   val s0_valid = io.req.fire()
   val s0_vaddr = io.req.bits.addr
   s1_valid := s0_valid
 
+  val refill_vaddr = dontTouch(RegEnable(s0_vaddr, s0_valid && !(refill_valid || s2_miss))) //New
+  val refill_vtag = refill_vaddr(tagBits+untagBits-1,untagBits) //New
+
   val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
   val refill_done = refill_one_beat && d_done
-  tl_out.d.ready := !s3_slaveValid
+  tl_out.d.ready := !false
   require (edge_out.manager.minLatency > 0)
+
 
   val repl_way = if (isDM) UInt(0) else {
     // pick a way that is not used by the scratchpad
     val v0 = LFSR16(refill_fire)(log2Up(nWays)-1,0)
     var v = v0
-    for (i <- log2Ceil(nWays) - 1 to 0 by -1) {
-      val mask = nWays - (BigInt(1) << (i + 1))
-      v = v | (lineInScratchpad(Cat(v0 | mask.U, refill_idx)) << i)
-    }
-    assert(!lineInScratchpad(Cat(v, refill_idx)))
     v
-  }
-
-  val tag_array = SeqMem(nSets, Vec(nWays, UInt(width = tECC.width(1 + tagBits))))
-  val tag_rdata = tag_array.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid)
-  val accruedRefillError = Reg(Bool())
-  when (refill_done) {
-    val enc_tag = tECC.encode(Cat(tl_out.d.bits.error, refill_tag))
-    tag_array.write(refill_idx, Vec.fill(nWays)(enc_tag), Seq.tabulate(nWays)(repl_way === _))
-
-    ccover(tl_out.d.bits.error, "D_ERROR", "I$ D-channel error")
   }
 
   val vb_array = Reg(init=Bits(0, nSets*nWays))
   when (refill_one_beat) {
     // clear bit when refill starts so hit-under-miss doesn't fetch bad data
     vb_array := vb_array.bitSet(Cat(repl_way, refill_idx), refill_done && !invalidated)
+    
   }
-  val invalidate = Wire(init = io.invalidate)
+
+  val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = tECC.width(tagBits)))))
+  val s0_way_idx = s0_vaddr(untagBits-1,blockOffBits)
+  val s0_way_tag = s0_vaddr(tagBits+untagBits-1,untagBits)
+  val s0_way_tag_xor = s0_way_tag//(4,0) ^ s0_way_tag(9,5) ^ s0_way_tag(14,10) ^ s0_way_tag(19,15)
+  
+  val way_0 = vb_array(Cat(UInt(0), s0_way_idx)) && (tag_ways(Cat(UInt(0), s0_way_idx)) === s0_way_tag_xor)
+  val way_1 = vb_array(Cat(UInt(1), s0_way_idx)) && (tag_ways(Cat(UInt(1), s0_way_idx)) === s0_way_tag_xor)
+  val way_2 = vb_array(Cat(UInt(2), s0_way_idx)) && (tag_ways(Cat(UInt(2), s0_way_idx)) === s0_way_tag_xor)
+  val way_3 = vb_array(Cat(UInt(3), s0_way_idx)) && (tag_ways(Cat(UInt(3), s0_way_idx)) === s0_way_tag_xor)
+
+  val way_seq = Seq(way_0, way_1, way_2, way_3)
+  //val way_seq = dontTouch(Reg(Vec(nWays, Bool())))
+  //for (i <- 0 until nWays) {
+  //  way_seq(i) := vb_array(Cat(UInt(i), s1_way_idx)) && (tag_ways(Cat(UInt(i), s1_way_idx)) === s1_way_tag)
+  //}
+  val way_not_detected = Bool(false) (PopCount(way_seq) =/= 1.U)
+
+  /*val point = 0
+  val point = {for (i <- 0 until nWays) {
+    val s1_idx = io.s1_paddr(untagBits-1,blockOffBits)
+    val s1_tag = io.s1_paddr(tagBits+untagBits-1,untagBits)
+    val s1_vb = vb_array(Cat(UInt(i), s1_idx))
+    val s1_tag_way = tag_ways(Cat(UInt(i), s1_idx))
+    when (s1_tag === s1_tag_way) {point = point + 1 + i}
+  }}*/
+  
+
+  // 4 SRAMs, 1 SRAM for each way
+  //val tag_arrays = Seq.fill(nWays)(SeqMem(nSets, UInt(width = tECC.width(1 + tagBits))))
+  val tag_array_0 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
+  val tag_array_1 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
+  val tag_array_2 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
+  val tag_array_3 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
+  // Read all the ways in parallel
+  val tag_0 = tag_array_0.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(0) || way_not_detected))
+  val tag_1 = tag_array_1.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(1) || way_not_detected))
+  val tag_2 = tag_array_2.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(2) || way_not_detected))
+  val tag_3 = tag_array_3.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(3) || way_not_detected))
+
+  val tag_rdata = Vec(tag_0, tag_1, tag_2, tag_3)
+  
+  val accruedRefillError = Reg(Bool())
+  
+  when (refill_done) {
+    //for ((tag_array, i) <- tag_arrays zipWithIndex) {
+      //when(repl_way === i.U) {
+        val enc_tag = tECC.encode(Cat(tl_out.d.bits.error, refill_tag))
+
+        when (repl_way === 0.U) {tag_array_0.write(refill_idx, enc_tag)}
+        .elsewhen (repl_way === 1.U) {tag_array_1.write(refill_idx, enc_tag)}
+        .elsewhen (repl_way === 2.U) {tag_array_2.write(refill_idx, enc_tag)}
+        .otherwise {tag_array_3.write(refill_idx, enc_tag)}
+
+        //tag_ways(Cat(repl_way, refill_idx)) := refill_vtag //(4,0) ^ refill_vtag(9,5) ^ refill_vtag(14,10) ^ refill_vtag(19,15)
+        ccover(tl_out.d.bits.error, "D_ERROR", "I$ D-channel error") 
+      //}
+    //}
+  }
+
+  
+  val invalidate = dontTouch(Wire(init = io.invalidate))
   when (invalidate) {
     vb_array := Bits(0)
     invalidated := Bool(true)
   }
 
-  val s1_tag_disparity = Wire(Vec(nWays, Bool()))
+  val s1_tag_disparity = dontTouch(Wire(Vec(nWays, Bool())))
   val s1_tl_error = Wire(Vec(nWays, Bool()))
   val wordBits = outer.icacheParams.fetchBytes*8
-  val s1_dout = Wire(Vec(nWays, UInt(width = dECC.width(wordBits))))
 
-  val s0_slaveAddr = tl_in.map(_.a.bits.address).getOrElse(0.U)
-  val s1s3_slaveAddr = Reg(UInt(width = log2Ceil(outer.size)))
-  val s1s3_slaveData = Reg(UInt(width = wordBits))
+  val s1_dout_0 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
+  val s1_dout_1 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
+  val s1_dout_2 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
+  val s1_dout_3 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
+  
+  //val s1_dout = Wire(Vec(nWays, UInt(width = dECC.width(wordBits))))
+  val s1_dout = Wire(init=Vec(s1_dout_0, s1_dout_1, s1_dout_2, s1_dout_3))
 
+  
   for (i <- 0 until nWays) {
     val s1_idx = io.s1_paddr(untagBits-1,blockOffBits)
     val s1_tag = io.s1_paddr(tagBits+untagBits-1,untagBits)
-    val scratchpadHit = scratchpadWayValid(i) &&
-      Mux(s1_slaveValid,
-        lineInScratchpad(scratchpadLine(s1s3_slaveAddr)) && scratchpadWay(s1s3_slaveAddr) === i,
-        addrInScratchpad(io.s1_paddr) && scratchpadWay(io.s1_paddr) === i)
-    val s1_vb = vb_array(Cat(UInt(i), s1_idx)) && !s1_slaveValid
+    val s1_vb = vb_array(Cat(UInt(i), s1_idx))
     val enc_tag = tECC.decode(tag_rdata(i))
     val (tl_error, tag) = Split(enc_tag.uncorrected, tagBits)
     val tagMatch = s1_vb && tag === s1_tag
     s1_tag_disparity(i) := s1_vb && enc_tag.error
     s1_tl_error(i) := tagMatch && tl_error.toBool
-    s1_tag_hit(i) := tagMatch || scratchpadHit
+    s1_tag_hit(i) := tagMatch
   }
-  assert(!(s1_valid || s1_slaveValid) || PopCount(s1_tag_hit zip s1_tag_disparity map { case (h, d) => h && !d }) <= 1)
+  assert(PopCount(s1_tag_hit zip s1_tag_disparity map { case (h, d) => h && !d }) <= 1)
 
   require(tl_out.d.bits.data.getWidth % wordBits == 0)
-  val data_arrays = Seq.fill(tl_out.d.bits.data.getWidth / wordBits) { SeqMem(nSets * refillCycles, Vec(nWays, UInt(width = dECC.width(wordBits)))) }
-  for ((data_array, i) <- data_arrays zipWithIndex) {
+  val data_arrays_0 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
+  val data_arrays_1 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
+  val data_arrays_2 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
+  val data_arrays_3 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
+
+  for ((data_array, i) <- data_arrays_0 zipWithIndex) {
     def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i
     def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
-    val s0_ren = (s0_valid && wordMatch(s0_vaddr)) || (s0_slaveValid && wordMatch(s0_slaveAddr))
-    val wen = (refill_one_beat && !invalidated) || (s3_slaveValid && wordMatch(s1s3_slaveAddr))
-    val mem_idx = Mux(refill_one_beat, (refill_idx << log2Ceil(refillCycles)) | refill_cnt,
-                  Mux(s3_slaveValid, row(s1s3_slaveAddr),
-                  Mux(s0_slaveValid, row(s0_slaveAddr),
-                  row(s0_vaddr))))
+    val s0_ren = (s0_valid && wordMatch(s0_vaddr))
+    val wen = (refill_one_beat && !invalidated)
+    val mem_idx = Mux(refill_one_beat, (refill_idx << log2Ceil(refillCycles)) | refill_cnt, row(s0_vaddr))
     when (wen) {
-      val data = Mux(s3_slaveValid, s1s3_slaveData, tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i))
-      val way = Mux(s3_slaveValid, scratchpadWay(s1s3_slaveAddr), repl_way)
-      data_array.write(mem_idx, Vec.fill(nWays)(dECC.encode(data)), (0 until nWays).map(way === _))
+      val data = tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i)
+      val way = repl_way
+      //for ((data_array_inner, i) <- data_array zipWithIndex) {
+        when (way === 0.U) {data_array.write(mem_idx, dECC.encode(data))}
+      //}
     }
-    val dout = data_array.read(mem_idx, !wen && s0_ren)
-    when (wordMatch(Mux(s1_slaveValid, s1s3_slaveAddr, io.s1_paddr))) {
-      s1_dout := dout
+
+    //val dout = Reg(Vec(nWays, UInt(width = tECC.width(wordBits)))) //Register for 4 way tags
+    
+
+    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(0) || way_not_detected))
+    
+    //val dout = Vec(data_0, data_1, data_2, data_3)
+
+    when (wordMatch(io.s1_paddr)) {
+      //s1_dout(0) := dout
+      s1_dout_0 := dout
+      //s1_dout_orig(0) := dout
     }
   }
 
-  val s1_clk_en = s1_valid || s1_slaveValid
+  for ((data_array, i) <- data_arrays_1 zipWithIndex) {
+    def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i
+    def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
+    val s0_ren = (s0_valid && wordMatch(s0_vaddr))
+    val wen = (refill_one_beat && !invalidated)
+    val mem_idx = Mux(refill_one_beat, (refill_idx << log2Ceil(refillCycles)) | refill_cnt, row(s0_vaddr))
+    when (wen) {
+      val data = tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i)
+      val way = repl_way
+      //for ((data_array_inner, i) <- data_array zipWithIndex) {
+        when (way === 1.U) {data_array.write(mem_idx, dECC.encode(data))}
+      //}
+    }
+
+    //val dout = Reg(Vec(nWays, UInt(width = tECC.width(wordBits)))) //Register for 4 way tags
+    
+
+    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(1) || way_not_detected))
+    
+    //val dout = Vec(data_0, data_1, data_2, data_3)
+
+    when (wordMatch(io.s1_paddr)) {
+      //s1_dout(1) := dout
+      s1_dout_1 := dout
+      //s1_dout_orig(1) := dout
+    }
+  }
+
+  for ((data_array, i) <- data_arrays_2 zipWithIndex) {
+    def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i
+    def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
+    val s0_ren = (s0_valid && wordMatch(s0_vaddr))
+    val wen = (refill_one_beat && !invalidated)
+    val mem_idx = Mux(refill_one_beat, (refill_idx << log2Ceil(refillCycles)) | refill_cnt, row(s0_vaddr))
+    when (wen) {
+      val data = tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i)
+      val way = repl_way
+      //for ((data_array_inner, i) <- data_array zipWithIndex) {
+        when (way === 2.U) {data_array.write(mem_idx, dECC.encode(data))}
+      //}
+    }
+
+    //val dout = Reg(Vec(nWays, UInt(width = tECC.width(wordBits)))) //Register for 4 way tags
+    
+
+    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(2) || way_not_detected))
+    
+    //val dout = Vec(data_0, data_1, data_2, data_3)
+
+    when (wordMatch(io.s1_paddr)) {
+      //s1_dout(2) := dout
+      s1_dout_2 := dout
+      //s1_dout_orig(2) := dout
+    }
+  }
+
+  for ((data_array, i) <- data_arrays_3 zipWithIndex) {
+    def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i
+    def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
+    val s0_ren = (s0_valid && wordMatch(s0_vaddr))
+    val wen = (refill_one_beat && !invalidated)
+    val mem_idx = Mux(refill_one_beat, (refill_idx << log2Ceil(refillCycles)) | refill_cnt, row(s0_vaddr))
+    when (wen) {
+      val data = tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i)
+      val way = repl_way
+      //for ((data_array_inner, i) <- data_array zipWithIndex) {
+        when (way === 3.U) {data_array.write(mem_idx, dECC.encode(data))}
+      //}
+    }
+
+    //val dout = Reg(Vec(nWays, UInt(width = tECC.width(wordBits)))) //Register for 4 way tags
+    
+
+    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(3) || way_not_detected))
+    
+    //val dout = Vec(data_0, data_1, data_2, data_3)
+
+    when (wordMatch(io.s1_paddr)) {
+      //s1_dout(3) := dout
+      s1_dout_3 := dout
+      //s1_dout_orig(3) := dout
+    }
+  }
+
+
+  val s1_clk_en = s1_valid
   val s2_tag_hit = RegEnable(s1_tag_hit, s1_clk_en)
   val s2_hit_way = OHToUInt(s2_tag_hit)
-  val s2_scratchpad_word_addr = Cat(s2_hit_way, Mux(s2_slaveValid, s1s3_slaveAddr, io.s2_vaddr)(untagBits-1, log2Ceil(wordBits/8)), UInt(0, log2Ceil(wordBits/8)))
   val s2_dout = RegEnable(s1_dout, s1_clk_en)
   val s2_way_mux = Mux1H(s2_tag_hit, s2_dout)
 
@@ -258,13 +388,10 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val s2_tl_error = RegEnable(s1_tl_error.asUInt.orR, s1_clk_en)
   val s2_data_decoded = dECC.decode(s2_way_mux)
   val s2_disparity = s2_tag_disparity || s2_data_decoded.error
-  val s2_full_word_write = Wire(init = false.B)
 
-  val s1_scratchpad_hit = Mux(s1_slaveValid, lineInScratchpad(scratchpadLine(s1s3_slaveAddr)), addrInScratchpad(io.s1_paddr))
-  val s2_scratchpad_hit = RegEnable(s1_scratchpad_hit, s1_clk_en)
-  val s2_report_uncorrectable_error = s2_scratchpad_hit && s2_data_decoded.uncorrectable && (s2_valid || (s2_slaveValid && !s2_full_word_write))
-  val s2_error_addr = scratchpadBase.map(base => Mux(s2_scratchpad_hit, base + s2_scratchpad_word_addr, 0.U)).getOrElse(0.U)
+  
 
+  
   // output signals
   outer.icacheParams.latency match {
     case 1 =>
@@ -277,89 +404,16 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
     case 2 =>
       // when some sort of memory bit error have occurred
-      when (s2_valid && s2_disparity) { invalidate := true }
+      when (s2_valid && s2_disparity) { 
+        invalidate := true
+        
+      }
 
       io.resp.bits.data := s2_data_decoded.uncorrected
       io.resp.bits.ae := s2_tl_error
       io.resp.bits.replay := s2_disparity
       io.resp.valid := s2_valid && s2_hit
 
-      io.errors.correctable.foreach { c =>
-        c.valid := (s2_valid || s2_slaveValid) && s2_disparity && !s2_report_uncorrectable_error
-        c.bits := s2_error_addr
-      }
-      io.errors.uncorrectable.foreach { u =>
-        u.valid := s2_report_uncorrectable_error
-        u.bits := s2_error_addr
-      }
-
-      tl_in.map { tl =>
-        val respValid = RegInit(false.B)
-        tl.a.ready := !(tl_out.d.valid || s1_slaveValid || s2_slaveValid || s3_slaveValid || respValid)
-        val s1_a = RegEnable(tl.a.bits, s0_slaveValid)
-        s2_full_word_write := edge_in.get.hasData(s1_a) && s1_a.mask.andR
-        when (s0_slaveValid) {
-          val a = tl.a.bits
-          s1s3_slaveAddr := tl.a.bits.address
-          s1s3_slaveData := tl.a.bits.data
-          when (edge_in.get.hasData(a)) {
-            val enable = scratchpadWayValid(scratchpadWay(a.address))
-            when (!lineInScratchpad(scratchpadLine(a.address))) {
-              scratchpadMax.get := scratchpadLine(a.address)
-              invalidate := true
-            }
-            scratchpadOn := enable
-
-            val itim_allocated = !scratchpadOn && enable
-            val itim_deallocated = scratchpadOn && !enable
-            val itim_increase = scratchpadOn && enable && scratchpadLine(a.address) > scratchpadMax.get
-            val refilling = refill_valid && refill_cnt > 0
-            ccover(itim_allocated, "ITIM_ALLOCATE", "ITIM allocated")
-            ccover(itim_allocated && refilling, "ITIM_ALLOCATE_WHILE_REFILL", "ITIM allocated while I$ refill")
-            ccover(itim_deallocated, "ITIM_DEALLOCATE", "ITIM deallocated")
-            ccover(itim_deallocated && refilling, "ITIM_DEALLOCATE_WHILE_REFILL", "ITIM deallocated while I$ refill")
-            ccover(itim_increase, "ITIM_SIZE_INCREASE", "ITIM size increased")
-            ccover(itim_increase && refilling, "ITIM_SIZE_INCREASE_WHILE_REFILL", "ITIM size increased while I$ refill")
-          }
-        }
-
-        assert(!s2_valid || RegNext(RegNext(s0_vaddr)) === io.s2_vaddr)
-        when (!(tl.a.valid || s1_slaveValid || s2_slaveValid || respValid)
-              && s2_valid && s2_data_decoded.error && !s2_tag_disparity) {
-          // handle correctable errors on CPU accesses to the scratchpad.
-          // if there is an in-flight slave-port access to the scratchpad,
-          // report the a miss but don't correct the error (as there is
-          // a structural hazard on s1s3_slaveData/s1s3_slaveAddress).
-          s3_slaveValid := true
-          s1s3_slaveData := s2_data_decoded.corrected
-          s1s3_slaveAddr := s2_scratchpad_word_addr | s1s3_slaveAddr(log2Ceil(wordBits/8)-1, 0)
-        }
-
-        respValid := s2_slaveValid || (respValid && !tl.d.ready)
-        val respError = RegEnable(s2_scratchpad_hit && s2_data_decoded.uncorrectable && !s2_full_word_write, s2_slaveValid)
-        when (s2_slaveValid) {
-          when (edge_in.get.hasData(s1_a) || s2_data_decoded.error) { s3_slaveValid := true }
-          def byteEn(i: Int) = !(edge_in.get.hasData(s1_a) && s1_a.mask(i))
-          s1s3_slaveData := (0 until wordBits/8).map(i => Mux(byteEn(i), s2_data_decoded.corrected, s1s3_slaveData)(8*(i+1)-1, 8*i)).asUInt
-        }
-
-        tl.d.valid := respValid
-        tl.d.bits := Mux(edge_in.get.hasData(s1_a),
-          edge_in.get.AccessAck(s1_a),
-          edge_in.get.AccessAck(s1_a, UInt(0)))
-        tl.d.bits.data := s1s3_slaveData
-        tl.d.bits.error := respError
-
-        // Tie off unused channels
-        tl.b.valid := false
-        tl.c.ready := true
-        tl.e.ready := true
-
-        ccover(s0_valid && s1_slaveValid, "CONCURRENT_ITIM_ACCESS_1", "ITIM accessed, then I$ accessed next cycle")
-        ccover(s0_valid && s2_slaveValid, "CONCURRENT_ITIM_ACCESS_2", "ITIM accessed, then I$ accessed two cycles later")
-        ccover(tl.d.valid && !tl.d.ready, "ITIM_D_STALL", "ITIM response blocked by D-channel")
-        ccover(tl_out.d.valid && !tl_out.d.ready, "ITIM_BLOCK_D", "D-channel blocked by ITIM access")
-      }
   }
 
   tl_out.a.valid := s2_miss && !refill_valid
@@ -367,48 +421,18 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
                     fromSource = UInt(0),
                     toAddress = (refill_addr >> blockOffBits) << blockOffBits,
                     lgSize = lgCacheBlockBytes)._2
-  if (cacheParams.prefetch) {
-    val (crosses_page, next_block) = Split(refill_addr(pgIdxBits-1, blockOffBits) +& 1, pgIdxBits-blockOffBits)
-    when (tl_out.a.fire()) {
-      send_hint := !hint_outstanding && io.s2_prefetch && !crosses_page
-      when (send_hint) {
-        send_hint := false
-        hint_outstanding := true
-      }
-    }
-    when (refill_done) {
-      send_hint := false
-    }
-    when (tl_out.d.fire() && !refill_one_beat) {
-      hint_outstanding := false
-    }
-
-    when (send_hint) {
-      tl_out.a.valid := true
-      tl_out.a.bits := edge_out.Hint(
-                        fromSource = UInt(1),
-                        toAddress = Cat(refill_addr >> pgIdxBits, next_block) << blockOffBits,
-                        lgSize = lgCacheBlockBytes,
-                        param = TLHints.PREFETCH_READ)._2
-    }
-
-    ccover(send_hint && !tl_out.a.ready, "PREFETCH_A_STALL", "I$ prefetch blocked by A-channel")
-    ccover(refill_valid && (tl_out.d.fire() && !refill_one_beat), "PREFETCH_D_BEFORE_MISS_D", "I$ prefetch resolves before miss")
-    ccover(!refill_valid && (tl_out.d.fire() && !refill_one_beat), "PREFETCH_D_AFTER_MISS_D", "I$ prefetch resolves after miss")
-    ccover(tl_out.a.fire() && hint_outstanding, "PREFETCH_D_AFTER_MISS_A", "I$ prefetch resolves after second miss")
-  }
+  
   tl_out.b.ready := Bool(true)
   tl_out.c.valid := Bool(false)
   tl_out.e.valid := Bool(false)
-  assert(!(tl_out.a.valid && addrMaybeInScratchpad(tl_out.a.bits.address)))
-
+  
   when (!refill_valid) { invalidated := false.B }
   when (refill_fire) { refill_valid := true.B }
   when (refill_done) { refill_valid := false.B}
 
   io.perf.acquire := refill_fire
 
-  ccover(!send_hint && (tl_out.a.valid && !tl_out.a.ready), "MISS_A_STALL", "I$ miss blocked by A-channel")
+  ccover((tl_out.a.valid && !tl_out.a.ready), "MISS_A_STALL", "I$ miss blocked by A-channel")
   ccover(invalidate && refill_valid, "FLUSH_DURING_MISS", "I$ flushed during miss")
 
   def ccover(cond: Bool, label: String, desc: String)(implicit sourceInfo: SourceInfo) =
@@ -420,16 +444,16 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     CoverBoolean(s2_data_decoded.correctable, Seq("data_correctable_error")),
     CoverBoolean(s2_data_decoded.uncorrectable, Seq("data_uncorrectable_error")))
   val request_source = Seq(
-    CoverBoolean(!s2_slaveValid, Seq("from_CPU")),
-    CoverBoolean(s2_slaveValid, Seq("from_TL"))
+    CoverBoolean(!false, Seq("from_CPU")),
+    CoverBoolean(false, Seq("from_TL"))
   )
   val tag_error = Seq(
     CoverBoolean(!s2_tag_disparity, Seq("no_tag_error")),
     CoverBoolean(s2_tag_disparity, Seq("tag_error"))
   )
   val mem_mode = Seq(
-    CoverBoolean(s2_scratchpad_hit, Seq("ITIM_mode")),
-    CoverBoolean(!s2_scratchpad_hit, Seq("cache_mode"))
+    CoverBoolean(false, Seq("ITIM_mode")),
+    CoverBoolean(!false, Seq("cache_mode"))
   )
 
   val error_cross_covers = new CrossProperty(
