@@ -18,15 +18,15 @@ import chisel3.experimental.chiselName
 
 case class ICacheParams(
     nSets: Int = 64,
-    nWays: Int = 4,
-    rowBits: Int = 128,
+    nWays: Int = 2,
+    rowBits: Int = 64,
     nTLBEntries: Int = 32,
     cacheIdBits: Int = 0,
     tagECC: Option[String] = None,
     dataECC: Option[String] = None,
     itimAddr: Option[BigInt] = None,
     prefetch: Boolean = false,
-    blockBytes: Int = 64,
+    blockBytes: Int = 128,
     latency: Int = 2,
     fetchBytes: Int = 4) extends L1CacheParams {
   def tagCode: Code = Code.fromString(tagECC)
@@ -198,15 +198,15 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   //val tag_arrays = Seq.fill(nWays)(SeqMem(nSets, UInt(width = tECC.width(1 + tagBits))))
   val tag_array_0 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
   val tag_array_1 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
-  val tag_array_2 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
-  val tag_array_3 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits)))
+  //val tag_array_2 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits))) //4
+  //val tag_array_3 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits))) //4
   // Read all the ways in parallel
   val tag_0 = tag_array_0.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(0) || way_not_detected))
   val tag_1 = tag_array_1.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(1) || way_not_detected))
-  val tag_2 = tag_array_2.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(2) || way_not_detected))
-  val tag_3 = tag_array_3.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(3) || way_not_detected))
+  //val tag_2 = tag_array_2.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(2) || way_not_detected)) //4
+  //val tag_3 = tag_array_3.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid) // && (way_seq(3) || way_not_detected)) //4
 
-  val tag_rdata = Vec(tag_0, tag_1, tag_2, tag_3)
+  val tag_rdata = Vec(tag_0, tag_1) // Vec(tag_0, tag_1, tag_2, tag_3) //4
   
   val accruedRefillError = Reg(Bool())
   
@@ -216,9 +216,9 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
         val enc_tag = tECC.encode(Cat(tl_out.d.bits.error, refill_tag))
 
         when (repl_way === 0.U) {tag_array_0.write(refill_idx, enc_tag)}
-        .elsewhen (repl_way === 1.U) {tag_array_1.write(refill_idx, enc_tag)}
-        .elsewhen (repl_way === 2.U) {tag_array_2.write(refill_idx, enc_tag)}
-        .otherwise {tag_array_3.write(refill_idx, enc_tag)}
+        .otherwise {tag_array_1.write(refill_idx, enc_tag)} //4 elsewhen (repl_way === 1.U)
+        //.elsewhen (repl_way === 2.U) {tag_array_2.write(refill_idx, enc_tag)} //4
+        //.otherwise {tag_array_3.write(refill_idx, enc_tag)} //4
 
         //tag_ways(Cat(repl_way, refill_idx)) := refill_vtag //(4,0) ^ refill_vtag(9,5) ^ refill_vtag(14,10) ^ refill_vtag(19,15)
         ccover(tl_out.d.bits.error, "D_ERROR", "I$ D-channel error") 
@@ -239,11 +239,11 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   val s1_dout_0 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
   val s1_dout_1 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
-  val s1_dout_2 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
-  val s1_dout_3 = dontTouch(Wire(UInt(width = dECC.width(wordBits))))
+  //val s1_dout_2 = dontTouch(Wire(UInt(width = dECC.width(wordBits)))) //4
+  //val s1_dout_3 = dontTouch(Wire(UInt(width = dECC.width(wordBits)))) //4
   
   //val s1_dout = Wire(Vec(nWays, UInt(width = dECC.width(wordBits))))
-  val s1_dout = Wire(init=Vec(s1_dout_0, s1_dout_1, s1_dout_2, s1_dout_3))
+  val s1_dout = Wire(init=Vec(s1_dout_0, s1_dout_1)) // Wire(init=Vec(s1_dout_0, s1_dout_1, s1_dout_2, s1_dout_3)) //4
 
   
   for (i <- 0 until nWays) {
@@ -262,8 +262,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   require(tl_out.d.bits.data.getWidth % wordBits == 0)
   val data_arrays_0 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
   val data_arrays_1 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
-  val data_arrays_2 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
-  val data_arrays_3 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))}
+  //val data_arrays_2 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))} //4
+  //val data_arrays_3 = Seq.fill(tl_out.d.bits.data.getWidth/wordBits) {SeqMem(nSets*refillCycles, UInt(width = dECC.width(wordBits)))} //4
 
   for ((data_array, i) <- data_arrays_0 zipWithIndex) {
     def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i
@@ -320,7 +320,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       //s1_dout_orig(1) := dout
     }
   }
-
+/* //4
   for ((data_array, i) <- data_arrays_2 zipWithIndex) {
     def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i
     def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
@@ -375,7 +375,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       s1_dout_3 := dout
       //s1_dout_orig(3) := dout
     }
-  }
+  } */ //4
 
 
   val s1_clk_en = s1_valid
