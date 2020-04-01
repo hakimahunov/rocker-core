@@ -143,9 +143,11 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val s0_valid = io.req.fire()
   val s0_vaddr = io.req.bits.addr
   s1_valid := s0_valid
+  val s_1_vaddr = dontTouch(RegNext(s0_vaddr))
 
-  val refill_vaddr = dontTouch(RegEnable(s0_vaddr, s0_valid && !(refill_valid || s2_miss))) //New
+  val refill_vaddr = dontTouch(RegEnable(s_1_vaddr, s1_valid && !(refill_valid || s2_miss))) //New
   val refill_vtag = refill_vaddr(tagBits+untagBits-1,untagBits) //New
+  val refill_vidx = refill_vaddr(untagBits-1,blockOffBits) //New
 
   val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
   val refill_done = refill_one_beat && d_done
@@ -167,22 +169,27 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     
   }
 
-  val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = tECC.width(tagBits)))))
+  val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = tECC.width(tagBits) + 6))))
   val s0_way_idx = s0_vaddr(untagBits-1,blockOffBits)
   val s0_way_tag = s0_vaddr(tagBits+untagBits-1,untagBits)
-  val s0_way_tag_xor = s0_way_tag//(4,0) ^ s0_way_tag(9,5) ^ s0_way_tag(14,10) ^ s0_way_tag(19,15)
-  
-  val way_0 = vb_array(Cat(UInt(0), s0_way_idx)) && (tag_ways(Cat(UInt(0), s0_way_idx)) === s0_way_tag_xor)
-  val way_1 = vb_array(Cat(UInt(1), s0_way_idx)) && (tag_ways(Cat(UInt(1), s0_way_idx)) === s0_way_tag_xor)
-  val way_2 = vb_array(Cat(UInt(2), s0_way_idx)) && (tag_ways(Cat(UInt(2), s0_way_idx)) === s0_way_tag_xor)
-  val way_3 = vb_array(Cat(UInt(3), s0_way_idx)) && (tag_ways(Cat(UInt(3), s0_way_idx)) === s0_way_tag_xor)
+  val s0_way_tag_xor = Cat(s0_way_tag, s0_way_idx)//(4,0) ^ s0_way_tag(9,5) ^ s0_way_tag(14,10) ^ s0_way_tag(19,15)
+ 
+  val vb_way0 = vb_array(Cat(UInt(0), s0_way_idx))
+  val vb_way1 = vb_array(Cat(UInt(1), s0_way_idx))
+  val vb_way2 = vb_array(Cat(UInt(2), s0_way_idx))
+  val vb_way3 = vb_array(Cat(UInt(3), s0_way_idx))  
+ 
+  val way_0 = (tag_ways(Cat(UInt(0), s0_way_idx)) === s0_way_tag_xor && vb_way0)
+  val way_1 = (tag_ways(Cat(UInt(1), s0_way_idx)) === s0_way_tag_xor && vb_way1)
+  val way_2 = (tag_ways(Cat(UInt(2), s0_way_idx)) === s0_way_tag_xor && vb_way2)
+  val way_3 = (tag_ways(Cat(UInt(3), s0_way_idx)) === s0_way_tag_xor && vb_way3)
 
   val way_seq = Seq(way_0, way_1, way_2, way_3)
   //val way_seq = dontTouch(Reg(Vec(nWays, Bool())))
   //for (i <- 0 until nWays) {
   //  way_seq(i) := vb_array(Cat(UInt(i), s1_way_idx)) && (tag_ways(Cat(UInt(i), s1_way_idx)) === s1_way_tag)
   //}
-  val way_not_detected = Bool(false) (PopCount(way_seq) =/= 1.U)
+  val way_not_detected = (PopCount(way_seq) === 0.U)
 
   val cntRegWay0 = dontTouch(RegInit (0.U(32.W))) //New
   val cntRegWay1 = dontTouch(RegInit (0.U(32.W))) //New
@@ -201,10 +208,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val cntRegWay14 = dontTouch(RegInit (0.U(32.W))) //New
   val cntRegWay15 = dontTouch(RegInit (0.U(32.W))) //New
 
-  val vb_way0 = vb_array(Cat(UInt(0), s0_way_idx))
-  val vb_way1 = vb_array(Cat(UInt(1), s0_way_idx))
-  val vb_way2 = vb_array(Cat(UInt(2), s0_way_idx))
-  val vb_way3 = vb_array(Cat(UInt(3), s0_way_idx))
+  
   
   when( !refill_done && s0_valid && !vb_way0 && !vb_way1 && !vb_way2 && !vb_way3 && !refill_valid) {
     cntRegWay0 := cntRegWay0 + 1.U
@@ -262,10 +266,10 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val tag_array_2 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits))) //4
   val tag_array_3 = SeqMem(nSets, UInt(width = tECC.width(1 + tagBits))) //4
   // Read all the ways in parallel
-  val tag_0 = tag_array_0.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && vb_array(Cat(UInt(0), s0_way_idx))) // && (way_seq(0) || way_not_detected))
-  val tag_1 = tag_array_1.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && vb_array(Cat(UInt(1), s0_way_idx))) // && (way_seq(1) || way_not_detected))
-  val tag_2 = tag_array_2.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && vb_array(Cat(UInt(2), s0_way_idx))) // && (way_seq(2) || way_not_detected)) //4
-  val tag_3 = tag_array_3.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && vb_array(Cat(UInt(3), s0_way_idx))) // && (way_seq(3) || way_not_detected)) //4
+  val tag_0 = tag_array_0.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && (way_seq(0) || way_not_detected))
+  val tag_1 = tag_array_1.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && (way_seq(1) || way_not_detected))
+  val tag_2 = tag_array_2.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && (way_seq(2) || way_not_detected)) //4
+  val tag_3 = tag_array_3.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid && (way_seq(3) || way_not_detected)) //4
 
   val tag_rdata = Vec(tag_0, tag_1, tag_2, tag_3) //4 Vec(tag_0, tag_1) //2 
   
@@ -281,7 +285,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
         .elsewhen (repl_way === 2.U) {tag_array_2.write(refill_idx, enc_tag)} //4
         .otherwise {tag_array_3.write(refill_idx, enc_tag)} //4
 
-        //tag_ways(Cat(repl_way, refill_idx)) := refill_vtag //(4,0) ^ refill_vtag(9,5) ^ refill_vtag(14,10) ^ refill_vtag(19,15)
+        tag_ways(Cat(repl_way, refill_idx)) := Cat(refill_vtag, refill_vidx)//(4,0) ^ refill_vtag(9,5) ^ refill_vtag(14,10) ^ refill_vtag(19,15)
         ccover(tl_out.d.bits.error, "D_ERROR", "I$ D-channel error") 
       //}
     //}
@@ -346,7 +350,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       cntRegData := cntRegData + 1.U
     }
 
-    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(0) || way_not_detected))
+    val dout = data_array.read(mem_idx, !wen && s0_ren && (way_seq(0) || way_not_detected))
     
     //val dout = Vec(data_0, data_1, data_2, data_3)
 
@@ -376,7 +380,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
       cntRegData := cntRegData + 1.U
     }
 
-    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(1) || way_not_detected))
+    val dout = data_array.read(mem_idx, !wen && s0_ren && (way_seq(1) || way_not_detected))
     
     //val dout = Vec(data_0, data_1, data_2, data_3)
 
@@ -402,7 +406,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     }
     //val dout = Reg(Vec(nWays, UInt(width = tECC.width(wordBits)))) //Register for 4 way tags
     
-    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(2) || way_not_detected))
+    val dout = data_array.read(mem_idx, !wen && s0_ren && (way_seq(2) || way_not_detected))
     
     //val dout = Vec(data_0, data_1, data_2, data_3)
     when (wordMatch(io.s1_paddr)) {
@@ -426,7 +430,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     }
     //val dout = Reg(Vec(nWays, UInt(width = tECC.width(wordBits)))) //Register for 4 way tags
     
-    val dout = data_array.read(mem_idx, !wen && s0_ren) // && (way_seq(3) || way_not_detected))
+    val dout = data_array.read(mem_idx, !wen && s0_ren && (way_seq(3) || way_not_detected))
     
     //val dout = Vec(data_0, data_1, data_2, data_3)
     when (wordMatch(io.s1_paddr)) {
