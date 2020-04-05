@@ -172,7 +172,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = tECC.width(tagBits) + 6))))
   val s0_way_idx = s0_vaddr(untagBits-1,blockOffBits)
   val s0_way_tag = s0_vaddr(tagBits+untagBits-1,untagBits)
-  val s0_way_tag_xor = Cat(s0_way_tag, s0_way_idx)//(4,0) ^ s0_way_tag(9,5) ^ s0_way_tag(14,10) ^ s0_way_tag(19,15)
+  val s0_tag_index = Cat(s0_way_tag, s0_way_idx)
+  val s0_way_tag_xor = s0_tag_index(7,0) ^ s0_tag_index(15,8) ^ s0_tag_index(23,16)  
  
   val vb_way0 = vb_array(Cat(UInt(0), s0_way_idx))
   val vb_way1 = vb_array(Cat(UInt(1), s0_way_idx))
@@ -210,52 +211,52 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   
   
-  when( !refill_done && s0_valid && !vb_way0 && !vb_way1 && !vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && !way_1 && !way_2 && !way_3 && !refill_valid) {
     cntRegWay0 := cntRegWay0 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && !vb_way1 && !vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && !way_1 && !way_2 && !way_3 && !refill_valid) {
     cntRegWay1 := cntRegWay1 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && vb_way1 && !vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && way_1 && !way_2 && !way_3 && !refill_valid) {
     cntRegWay2 := cntRegWay2 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && vb_way1 && !vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && way_1 && !way_2 && !way_3 && !refill_valid) {
     cntRegWay3 := cntRegWay3 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && !vb_way1 && vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && !way_1 && way_2 && !way_3 && !refill_valid) {
     cntRegWay4 := cntRegWay4 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && !vb_way1 && vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && !way_1 && way_2 && !way_3 && !refill_valid) {
     cntRegWay5 := cntRegWay5 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && vb_way1 && vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && way_1 && way_2 && !way_3 && !refill_valid) {
     cntRegWay6 := cntRegWay6 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && vb_way1 && vb_way2 && !vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && way_1 && way_2 && !way_3 && !refill_valid) {
     cntRegWay7 := cntRegWay7 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && !vb_way1 && !vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && !way_1 && !way_2 && way_3 && !refill_valid) {
     cntRegWay8 := cntRegWay8 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && !vb_way1 && !vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && !way_1 && !way_2 && way_3 && !refill_valid) {
     cntRegWay9 := cntRegWay9 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && vb_way1 && !vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && way_1 && !way_2 && way_3 && !refill_valid) {
     cntRegWay10 := cntRegWay10 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && vb_way1 && !vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && way_1 && !way_2 && way_3 && !refill_valid) {
     cntRegWay11 := cntRegWay11 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && !vb_way1 && vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && !way_1 && way_2 && way_3 && !refill_valid) {
     cntRegWay12 := cntRegWay12 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && !vb_way1 && vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && !way_1 && way_2 && way_3 && !refill_valid) {
     cntRegWay13 := cntRegWay13 + 1.U
   }
-  when( !refill_done && s0_valid && !vb_way0 && vb_way1 && vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && !way_0 && way_1 && way_2 && way_3 && !refill_valid) {
     cntRegWay14 := cntRegWay14 + 1.U
   }
-  when( !refill_done && s0_valid && vb_way0 && vb_way1 && vb_way2 && vb_way3 && !refill_valid) {
+  when( !refill_done && s0_valid && way_0 && way_1 && way_2 && way_3 && !refill_valid) {
     cntRegWay15 := cntRegWay15 + 1.U
   }
 
@@ -285,7 +286,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
         .elsewhen (repl_way === 2.U) {tag_array_2.write(refill_idx, enc_tag)} //4
         .otherwise {tag_array_3.write(refill_idx, enc_tag)} //4
 
-        tag_ways(Cat(repl_way, refill_idx)) := Cat(refill_vtag, refill_vidx)//(4,0) ^ refill_vtag(9,5) ^ refill_vtag(14,10) ^ refill_vtag(19,15)
+	val tag_index = Cat(refill_vtag, refill_vidx)
+        tag_ways(Cat(repl_way, refill_idx)) := tag_index(7,0) ^ tag_index(15,8) ^ tag_index(23,16)
         ccover(tl_out.d.bits.error, "D_ERROR", "I$ D-channel error") 
       //}
     //}
