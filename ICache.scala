@@ -169,7 +169,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     
   }
 
-  val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = tECC.width(tagBits) + 6))))
+  val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = 8))))
   val s0_way_idx = s0_vaddr(untagBits-1,blockOffBits)
   val s0_way_tag = s0_vaddr(tagBits+untagBits-1,untagBits)
   val s0_tag_index = Cat(s0_way_tag, s0_way_idx)
