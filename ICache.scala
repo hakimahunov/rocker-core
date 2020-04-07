@@ -169,21 +169,24 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     
   }
 
-  val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = 8))))
+  //val tag_ways = dontTouch(Reg(Vec(nSets*nWays, UInt(width = 8))))
+
+  val tag_ways = dontTouch(RegInit(Vec(Seq.fill(nSets)(4.U(3.W)))))
+
   val s0_way_idx = s0_vaddr(untagBits-1,blockOffBits)
   val s0_way_tag = s0_vaddr(tagBits+untagBits-1,untagBits)
   val s0_tag_index = Cat(s0_way_tag, s0_way_idx)
-  val s0_way_tag_xor = s0_tag_index(7,0) ^ s0_tag_index(15,8) ^ s0_tag_index(23,16)  
+  val s0_way_tag_xor = s0_tag_index(5,0) ^ s0_tag_index(11,6) ^ s0_tag_index(17,12) ^ s0_tag_index(23,18)  
  
   val vb_way0 = vb_array(Cat(UInt(0), s0_way_idx))
   val vb_way1 = vb_array(Cat(UInt(1), s0_way_idx))
   val vb_way2 = vb_array(Cat(UInt(2), s0_way_idx))
   val vb_way3 = vb_array(Cat(UInt(3), s0_way_idx))  
  
-  val way_0 = (tag_ways(Cat(UInt(0), s0_way_idx)) === s0_way_tag_xor && vb_way0)
-  val way_1 = (tag_ways(Cat(UInt(1), s0_way_idx)) === s0_way_tag_xor && vb_way1)
-  val way_2 = (tag_ways(Cat(UInt(2), s0_way_idx)) === s0_way_tag_xor && vb_way2)
-  val way_3 = (tag_ways(Cat(UInt(3), s0_way_idx)) === s0_way_tag_xor && vb_way3)
+  val way_0 = (tag_ways(s0_way_tag_xor) === 0.U && vb_way0)
+  val way_1 = (tag_ways(s0_way_tag_xor) === 1.U && vb_way1)
+  val way_2 = (tag_ways(s0_way_tag_xor) === 2.U && vb_way2)
+  val way_3 = (tag_ways(s0_way_tag_xor) === 3.U && vb_way3)
 
   val way_seq = Seq(way_0, way_1, way_2, way_3)
   //val way_seq = dontTouch(Reg(Vec(nWays, Bool())))
@@ -287,7 +290,8 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
         .otherwise {tag_array_3.write(refill_idx, enc_tag)} //4
 
 	val tag_index = Cat(refill_vtag, refill_vidx)
-        tag_ways(Cat(repl_way, refill_idx)) := tag_index(7,0) ^ tag_index(15,8) ^ tag_index(23,16)
+        //tag_ways(Cat(repl_way, refill_idx)) := tag_index(7,0) ^ tag_index(15,8) ^ tag_index(23,16)
+	tag_ways(tag_index(5,0) ^ tag_index(11,6) ^ tag_index(17,12) ^ tag_index(23,18)) := repl_way
         ccover(tl_out.d.bits.error, "D_ERROR", "I$ D-channel error") 
       //}
     //}
